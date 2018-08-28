@@ -21,11 +21,14 @@ limitations under the License.
 
 =========================================================================*/
 #include <Windows.h> // Sleep
+#include <exception>
 
 #include "itkImageFileWriter.h"
 
 #include "IntersonArrayCxxImagingContainer.h"
 #include "IntersonArrayCxxControlsHWControls.h"
+#include "igtlImageMessage.h"
+#include "igtlServerSocket.h"
 
 #include "AcquireIntersonArrayRFCLP.h"
 
@@ -36,10 +39,14 @@ typedef ContainerType::RFImagePixelType    PixelType;
 typedef itk::Image< PixelType, Dimension > ImageType;
 
 
+
 struct CallbackClientData
 {
   ImageType *        Image;
   itk::SizeValueType FrameIndex;
+  igtl::Socket::Pointer socket;
+  igtl::ImageMessage * imgMsg;
+  igtl::TimeStamp::Pointer ts;
 };
 
 void __stdcall pasteIntoImage( PixelType * buffer, void * clientData )
@@ -53,26 +60,49 @@ void __stdcall pasteIntoImage( PixelType * buffer, void * clientData )
     image->GetLargestPossibleRegion();
   const ImageType::SizeType imageSize = largestRegion.GetSize();
   const itk::SizeValueType imageFrames = largestRegion.GetSize()[2];
-  if( callbackClientData->FrameIndex >= imageFrames )
-    {
-    return;
-    }
+  
 
   const int framePixels = imageSize[0] * imageSize[1];
 
   PixelType * imageBuffer = image->GetPixelContainer()->GetBufferPointer();
-  imageBuffer += framePixels * callbackClientData->FrameIndex;
-  std::memcpy( imageBuffer, buffer, framePixels * sizeof( PixelType ) );
+  //imageBuffer += framePixels * callbackClientData->FrameIndex;
+  //std::cerr << "Attempting copy: buffer to ITK image" << std::endl;
+  //std::memcpy( imageBuffer, buffer, framePixels * sizeof( PixelType ) );
 
-  std::cout << "Acquired frame RF: " << callbackClientData->FrameIndex
+  std::cerr << "Acquired frame RF: " << callbackClientData->FrameIndex
     << std::endl;
   ++(callbackClientData->FrameIndex);
+  
+
+  callbackClientData->imgMsg->SetMessageID(callbackClientData->FrameIndex);
+  callbackClientData->ts->GetTime();
+  callbackClientData->imgMsg->SetTimeStamp(callbackClientData->ts);
+
+  try {
+    //std::cerr << "Attempting copy: image to message" << std::endl;
+    std::memcpy(callbackClientData->imgMsg->GetScalarPointer(), buffer, framePixels * sizeof(PixelType));
+  }
+  catch (std::exception e)
+  {
+    std::cerr << "Bad frame! ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" << std::endl;
+    return;
+  }
+  
+
+  if (callbackClientData->socket.IsNull())
+  {
+    return;
+  }
+  //std::cout << "Socket is good! sending" << std::endl;
+  callbackClientData->imgMsg->Pack();
+  callbackClientData->socket->Send(callbackClientData->imgMsg->GetPackPointer(), callbackClientData->imgMsg->GetPackSize());
 }
 
 int main( int argc, char * argv[] )
 {
   PARSE_ARGS;
 
+  
   typedef IntersonArrayCxx::Controls::HWControls HWControlsType;
   IntersonArrayCxx::Controls::HWControls hwControls;
 
@@ -124,7 +154,7 @@ int main( int argc, char * argv[] )
   std::cout << "Lines per array: " << height_lines << std::endl;
   const int width_samples = ContainerType::MAX_RFSAMPLES;
   std::cout << "Max RF samples: " << width_samples << std::endl;
-  const itk::SizeValueType framesToCollect = frames;
+  const itk::SizeValueType framesToCollect = 1;
 
   const double ns = ContainerType::MAX_RFSAMPLES; // number of samples
   const double fs = 30000; // [kHz]=[samples/ms] - sampling frequency
@@ -149,7 +179,7 @@ int main( int argc, char * argv[] )
   ImageType::SizeType imageSize;
   imageSize[0] = width_samples;
   imageSize[1] = height_lines;
-  imageSize[2] = framesToCollect;
+  imageSize[2] = 1;
   imageRegion.SetSize( imageSize );
   image->SetRegions( imageRegion );
   ImageType::SpacingType imageSpacing;
@@ -173,6 +203,51 @@ int main( int argc, char * argv[] )
   clientData.Image = image.GetPointer();
   clientData.FrameIndex = 0;
 
+  // size parameters
+  int   size[] = { ContainerType::MAX_RFSAMPLES, ContainerType::NBOFLINES, 1 };       // image dimension
+  float spacing[] = { 0.02567, 0.30159, 5.0 };     // spacing (mm/pixel)
+  int   svsize[] = { ContainerType::MAX_RFSAMPLES, ContainerType::NBOFLINES, 1 };       // sub-volume size
+  int   svoffset[] = { 0, 0, 0 };           // sub-volume offset
+  int   scalarType = igtl::ImageMessage::TYPE_INT16;// scalar type
+
+                                                    //------------------------------------------------------------
+                                                    // Create a new IMAGE type message
+  igtl::ImageMessage::Pointer imgMsg = igtl::ImageMessage::New();
+  imgMsg->SetDimensions(size);
+  imgMsg->SetSpacing(spacing);
+  imgMsg->SetScalarType(scalarType);
+  imgMsg->SetDeviceName("ImagerClient");
+  imgMsg->SetSubVolume(svsize, svoffset);
+  imgMsg->AllocateScalars();
+  Sleep(10);
+  imgMsg->SetEndian(igtl::ImageMessage::ENDIAN_LITTLE);
+  igtl::Matrix4x4 matrix;
+  matrix[0][0] = 0.0;  matrix[1][0] = -1.0;  matrix[2][0] = 0.0; matrix[3][0] = 0.0;
+  matrix[0][1] = 1.0;  matrix[1][1] = 0.0;  matrix[2][1] = 0.0; matrix[3][1] = 0.0;
+  matrix[0][2] = 0.0;  matrix[1][2] = 0.0;  matrix[2][2] = 1.0; matrix[3][2] = 0.0;
+  matrix[0][3] = 0.0;  matrix[1][3] = 0.0;  matrix[2][3] = 0.0; matrix[3][3] = 1.0;
+  imgMsg->SetMatrix(matrix);
+  igtl::TimeStamp::Pointer ts = igtl::TimeStamp::New();
+  clientData.ts = ts;
+  clientData.imgMsg = imgMsg.GetPointer();
+
+  //socket setup
+  int    port = 18944;
+  igtl::ServerSocket::Pointer serverSocket;
+  serverSocket = igtl::ServerSocket::New();
+  int r = serverSocket->CreateServer(port);
+
+  if (r < 0)
+  {
+    std::cerr << "Cannot create a server socket." << std::endl;
+    exit(0);
+  }
+  std::cerr << "Created Server socket." << std::endl;
+
+
+  igtl::Socket::Pointer socket;
+  clientData.socket = socket;
+
   container.SetNewRFImageCallback( &pasteIntoImage, &clientData );
 
   std::cout << "StartRFReadScan" << std::endl;
@@ -186,33 +261,28 @@ int main( int argc, char * argv[] )
     }
 
   int c = 0;
-  while( clientData.FrameIndex < framesToCollect && c < 10000 )
+  while( 1 )
     {
-    std::cout << "Frames to collect: " << clientData.FrameIndex << " of " << framesToCollect << std::endl;
-    std::cout << clientData.FrameIndex << " of " << framesToCollect
-      << std::endl;
-    Sleep( 100 );
-    ++c;
+    //------------------------------------------------------------
+    // Waiting for Connection
+    socket = serverSocket->WaitForConnection(1000);
+    clientData.socket = socket;
+    if (socket.IsNotNull()) // if client connected
+    {
+      //std::cout << "Socket should be good..." << std::endl;
+      
+      //recording = true;
+      //igtl::Sleep(100);
+      Sleep(100);
+
+    }
     }
 
   hwControls.StopAcquisition();
   container.StopReadScan();
   Sleep( 100 ); // "time to stop"
 
-  typedef itk::ImageFileWriter< ImageType > WriterType;
-  WriterType::Pointer writer = WriterType::New();
-  writer->SetFileName( outputImage );
-  writer->SetInput( image );
-
-  try
-    {
-    writer->Update();
-    }
-  catch( itk::ExceptionObject & error )
-    {
-    std::cerr << "Error: " << error << std::endl;
-    return EXIT_FAILURE;
-    }
+  
 
   return ret;
 }
