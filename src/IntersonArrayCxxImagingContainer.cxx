@@ -28,6 +28,7 @@ limitations under the License.
 #include <msclr/auto_gcroot.h>
 
 #using "IntersonArray.dll"
+#using "System.Drawing.dll"
 
 #pragma managed
 
@@ -245,7 +246,8 @@ public:
   Container::ScanConverterError HardInitScanConverter( int depth,
     int widthScan, int heightScan, int steering, int depthCfm )
   {
-    
+    this->widthScan = widthScan;
+    this->heightScan = heightScan;
     return static_cast< Container::ScanConverterError >(
       WrappedScanConverter->HardInitScanConverter( depth, widthScan,
         heightScan, steering, depthCfm, WrappedCapture.get(),
@@ -332,12 +334,44 @@ public:
   {
     this->hwControls = controls;
   }
+  void Build2D(Container::PixelType * bmode_bytedata, Container::PixelType * image_out) {
+    ContainerImpl::ArrayType^ bmode_bytedata_array =
+      gcnew ArrayType( Container::NBOFLINES, Container::MAX_SAMPLES );
+      
+    for ( int ii = 0; ii < Container::NBOFLINES; ++ii )
+      {
+      for ( int jj = 0; jj < Container::MAX_SAMPLES; ++jj )
+        {
+          bmode_bytedata_array[ii, jj] =
+            bmode_bytedata[Container::MAX_SAMPLES * ii + jj];
+        }
+      }
 
-  // 
+    System::Drawing::Bitmap^ image =
+      gcnew System::Drawing::Bitmap(widthScan, heightScan, System::Drawing::Imaging::PixelFormat::Format8bppIndexed);
+    WrappedImageBuilding->Build2D(image, bmode_bytedata_array, bmode_bytedata_array, WrappedScanConverter.get());
+    System::Drawing::Imaging::BitmapData^ bmpData = image->LockBits(System::Drawing::Rectangle(0, 0, widthScan, heightScan),
+      System::Drawing::Imaging::ImageLockMode::ReadOnly,
+      System::Drawing::Imaging::PixelFormat::Format8bppIndexed);
+    
+    char* row = reinterpret_cast<char*>(bmpData->Scan0.ToPointer());
+    for ( int ii = 0; ii < widthScan; ++ii )
+      {
+      for ( int jj = 0; jj < heightScan; ++jj )
+        {
+          image_out[widthScan * jj + ii] = row[jj];
+        }
+      row += bmpData->Stride;
+      }
+
+  }
+
+  //
   // Begin Wrapped ImageBuilding
   //
 
 private:
+  int widthScan, heightScan;
   IntersonArrayCxx::Controls::HWControls * hwControls;
   msclr::auto_gcroot< IntersonArray::Imaging::ScanConverter ^ >
     WrappedScanConverter;
@@ -555,6 +589,13 @@ Container
 ::SetHWControls(IntersonArrayCxx::Controls::HWControls * controls)
 {
   Impl->SetHWControls(controls);
+}
+
+void
+Container
+::Build2D(Container::PixelType * bmode_bytedata, Container::PixelType * image_out)
+{
+  Impl->Build2D(bmode_bytedata, image_out);
 }
 
 } // end namespace Imaging
