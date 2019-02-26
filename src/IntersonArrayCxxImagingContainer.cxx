@@ -359,7 +359,7 @@ public:
       {
       for ( int jj = 0; jj < heightScan; ++jj )
         {
-          image_out[widthScan * jj + ii] = row[jj];
+          image_out[widthScan * ii + jj] = row[jj];
         }
       row += bmpData->Stride;
       }
