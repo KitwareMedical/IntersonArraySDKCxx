@@ -80,6 +80,7 @@ public:
     OTHER_ERROR
   };
 
+  //widthScan and heightScan are the size of the final converted image
   ScanConverterError HardInitScanConverter( int depth, int widthScan,
     int heightScan, int steering, int depthCfm );
 
@@ -117,6 +118,10 @@ public:
     void *clientData = NULL );
 
   void SetHWControls(IntersonArrayCxx::Controls::HWControls * controls);
+
+  //Converts an array of b-mode transducer responses into an undistorted
+  //2-D image of size widthScan, heightScan.
+  void Build2D(PixelType * bmode_bytedata, PixelType * image_out);
 
 private:
 
